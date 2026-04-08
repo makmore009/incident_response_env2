@@ -10,6 +10,7 @@ Each scenario defines:
 """
 
 from dataclasses import dataclass, field
+import random
 from typing import Dict, List, Optional, Set
 
 
@@ -50,6 +51,44 @@ class Scenario:
     # Clue tracking
     relevant_services: Set[str] = field(default_factory=set)
     total_clues: int = 0
+
+
+def _variant_bucket(seed: int) -> int:
+    """Map an arbitrary seed to one of three deterministic variant buckets."""
+    return abs(int(seed)) % 3
+
+
+def _apply_seed_variant(scenario: Scenario, seed: int) -> Scenario:
+    """Apply light-weight deterministic variants for anti-hardcoding robustness."""
+    bucket = _variant_bucket(seed)
+    rng = random.Random(10_000 + seed + len(scenario.task_name) * 37)
+
+    suffixes = ["SLO watchdog", "synthetic canary", "latency sentinel"]
+    scenario.alert_summary = f"{scenario.alert_summary} [{suffixes[bucket]}]"
+    scenario.task_description = f"{scenario.task_description} (Scenario variant {bucket + 1}/3)"
+
+    # Small deterministic metric perturbations preserve semantics while reducing overfitting.
+    metric_delta = [0.0, 0.02, -0.015][bucket]
+    for service in scenario.services.values():
+        if "error_rate" in service.metrics:
+            v = float(service.metrics["error_rate"])
+            service.metrics["error_rate"] = round(max(0.0, min(0.99, v + metric_delta)), 3)
+        if "latency_p99_ms" in service.metrics:
+            v = float(service.metrics["latency_p99_ms"])
+            service.metrics["latency_p99_ms"] = round(max(1.0, v * (1.0 + metric_delta)), 2)
+
+    # Add one distractor-style operator message to a non-relevant service.
+    distractors = [
+        "[INFO]  observer: deployment canary healthy in unrelated subsystem",
+        "[WARN]  observer: transient network jitter observed in non-critical path",
+        "[INFO]  observer: routine maintenance log rotation completed",
+    ]
+    non_relevant = [s for s in scenario.services.values() if not s.is_relevant]
+    if non_relevant:
+        target = non_relevant[rng.randrange(len(non_relevant))]
+        target.log_lines.append(distractors[bucket])
+
+    return scenario
 
 
 def create_easy_scenario(seed: int = 42) -> Scenario:
@@ -165,7 +204,7 @@ def create_easy_scenario(seed: int = 42) -> Scenario:
         ),
     }
 
-    return Scenario(
+    scenario = Scenario(
         task_name="easy_config_error",
         task_difficulty="easy",
         max_steps=10,
@@ -185,6 +224,7 @@ def create_easy_scenario(seed: int = 42) -> Scenario:
         relevant_services={"payment-service"},
         total_clues=3,  # logs show error, metrics show error_rate, runbook has fix
     )
+    return _apply_seed_variant(scenario, seed)
 
 
 def create_medium_scenario(seed: int = 42) -> Scenario:
@@ -367,7 +407,7 @@ def create_medium_scenario(seed: int = 42) -> Scenario:
         ),
     }
 
-    return Scenario(
+    scenario = Scenario(
         task_name="medium_cascading_db",
         task_difficulty="medium",
         max_steps=15,
@@ -399,6 +439,7 @@ def create_medium_scenario(seed: int = 42) -> Scenario:
         relevant_services={"api-gateway", "user-service", "order-service", "db-primary"},
         total_clues=5,
     )
+    return _apply_seed_variant(scenario, seed)
 
 
 def create_hard_scenario(seed: int = 42) -> Scenario:
@@ -609,7 +650,7 @@ def create_hard_scenario(seed: int = 42) -> Scenario:
         ),
     }
 
-    return Scenario(
+    scenario = Scenario(
         task_name="hard_intermittent_auth",
         task_difficulty="hard",
         max_steps=20,
@@ -643,6 +684,7 @@ def create_hard_scenario(seed: int = 42) -> Scenario:
         relevant_services={"auth-service", "token-cache", "key-rotation-service"},
         total_clues=6,
     )
+    return _apply_seed_variant(scenario, seed)
 
 
 # Registry of all available scenarios

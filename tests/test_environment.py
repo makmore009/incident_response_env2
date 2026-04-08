@@ -38,6 +38,18 @@ def test_scenario_loading():
     print("✅ test_scenario_loading passed")
 
 
+def test_scenario_seed_variants_are_stable_and_distinct():
+    """Seeded scenario variants should be deterministic and visibly distinct."""
+    s1 = get_scenario("easy_config_error", seed=42)
+    s2 = get_scenario("easy_config_error", seed=42)
+    s3 = get_scenario("easy_config_error", seed=43)
+
+    assert s1.alert_summary == s2.alert_summary, "Same seed should produce same variant"
+    assert s1.alert_summary != s3.alert_summary, "Different seeds should produce different variants"
+
+    print("✅ test_scenario_seed_variants_are_stable_and_distinct passed")
+
+
 def test_root_cause_check_easy():
     """Test root cause matching for easy scenario."""
     scenario = get_scenario("easy_config_error")
@@ -355,10 +367,103 @@ def test_runtime_verification_signal_after_correct_remedy():
     print("✅ test_runtime_verification_signal_after_correct_remedy passed")
 
 
+def test_terminal_observation_contains_score_breakdown():
+    """Terminal observation should contain a deterministic grading breakdown."""
+    env = IncidentEnvironment()
+    env.reset(task_name="easy_config_error", seed=42)
+
+    env.step(IncidentAction(action_type="query_logs", target="payment-service", parameters={"filter": "error"}))
+    env.step(IncidentAction(action_type="check_metrics", target="payment-service", parameters={}))
+    env.step(
+        IncidentAction(
+            action_type="identify_root_cause",
+            target="",
+            parameters={"cause": "misconfigured STRIPE_API_KEY environment variable"},
+        )
+    )
+    final_obs = env.step(
+        IncidentAction(
+            action_type="execute_remedy",
+            target="",
+            parameters={"service": "payment-service", "remedy": "rollback_config"},
+        )
+    )
+
+    assert final_obs.done, "Expected episode termination"
+    assert final_obs.score_breakdown, "Terminal score breakdown should be present"
+    assert "total" in final_obs.score_breakdown, "Terminal breakdown should include total"
+
+    print("✅ test_terminal_observation_contains_score_breakdown passed")
+
+
+def test_exploit_noop_spam_scores_low():
+    """No-op spamming should converge to a low terminal score."""
+    env = IncidentEnvironment()
+    env.reset(task_name="easy_config_error")
+
+    obs = None
+    for _ in range(12):
+        obs = env.step(IncidentAction(action_type="noop", target="", parameters={}))
+        if obs.done:
+            break
+
+    assert obs is not None and obs.done, "Episode should eventually terminate"
+    assert obs.final_score < 0.2, f"No-op spam should score low, got {obs.final_score}"
+
+    print("✅ test_exploit_noop_spam_scores_low passed")
+
+
+def test_exploit_escalate_first_scores_low():
+    """Immediate escalation should be allowed but heavily penalized."""
+    env = IncidentEnvironment()
+    env.reset(task_name="medium_cascading_db")
+
+    obs = env.step(
+        IncidentAction(
+            action_type="escalate",
+            target="",
+            parameters={"reason": "Escalating before diagnosis"},
+        )
+    )
+
+    assert obs.done, "Escalation should end episode"
+    assert obs.final_score < 0.2, f"Escalate-first should score low, got {obs.final_score}"
+
+    print("✅ test_exploit_escalate_first_scores_low passed")
+
+
+def test_exploit_wrong_remedy_spam_scores_low():
+    """Repeated risky wrong remedies should accrue penalties and low terminal score."""
+    env = IncidentEnvironment()
+    env.reset(task_name="medium_cascading_db")
+
+    obs = None
+    for _ in range(6):
+        obs = env.step(
+            IncidentAction(
+                action_type="execute_remedy",
+                target="",
+                parameters={"service": "db-primary", "remedy": "restart_service"},
+            )
+        )
+        if obs.done:
+            break
+
+    while obs is not None and not obs.done:
+        obs = env.step(IncidentAction(action_type="noop", target="", parameters={}))
+
+    assert obs is not None and obs.done, "Episode should terminate within max steps"
+    assert env._history.risky_actions > 0, "Risky action counter should increase"
+    assert obs.final_score < 0.25, f"Wrong-remedy spam should score low, got {obs.final_score}"
+
+    print("✅ test_exploit_wrong_remedy_spam_scores_low passed")
+
+
 if __name__ == "__main__":
     print("\n🧪 Running Incident Response Environment Tests\n")
     test_list_tasks()
     test_scenario_loading()
+    test_scenario_seed_variants_are_stable_and_distinct()
     test_root_cause_check_easy()
     test_remedy_check_easy()
     test_grading_perfect_score()
@@ -371,4 +476,8 @@ if __name__ == "__main__":
     test_episode_aggregation_formulas_strict_open_interval()
     test_runtime_communication_and_noop_actions()
     test_runtime_verification_signal_after_correct_remedy()
+    test_terminal_observation_contains_score_breakdown()
+    test_exploit_noop_spam_scores_low()
+    test_exploit_escalate_first_scores_low()
+    test_exploit_wrong_remedy_spam_scores_low()
     print("\n✅ All tests passed!\n")

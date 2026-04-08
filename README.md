@@ -33,6 +33,8 @@ This is a **multi-step sequential decision problem** — perfect for training RL
 | `medium_cascading_db` | ⭐⭐ Medium | Cascading failure from a long-running database query exhausting connection pools | 15 |
 | `hard_intermittent_auth` | ⭐⭐⭐ Hard | Intermittent 401 errors caused by a race condition between JWT key rotation and token cache invalidation | 20 |
 
+Each task uses deterministic seeded variants (same objective, shifted telemetry and distractors) to reduce hardcoded-policy overfitting.
+
 ## Action Space
 
 The agent interacts via 9 tools:
@@ -81,6 +83,19 @@ Scores are strictly in (0.0, 1.0), composed of:
 | Risky pre-diagnosis action | -0.05 | Broad/high-risk mitigation before diagnosis |
 | No-op | -0.02 | Per no-op action |
 
+## Anti-Exploit Design
+
+- Destructive remediations are blocked and strongly penalized.
+- Escalation is allowed but heavily penalized when used as a shortcut.
+- No-op and repetitive low-information behavior are penalized.
+- Root-cause claims receive higher credit only when backed by evidence from logs and metrics.
+
+## Determinism & Explainability
+
+- Terminal observations include a deterministic score breakdown (`score_breakdown`) with all positive and penalty components.
+- `get_status` includes a score preview and variant metadata for debugging/review.
+- Seeded scenarios are deterministic and reproducible.
+
 ## Setup
 
 ### Prerequisites
@@ -111,9 +126,11 @@ docker run -p 8000:8000 incident-env:latest
 
 ## Human Review & API Testing
 
-This submission is configured in API-first mode for maximum reliability during automated evaluation.
+This submission supports both reviewer UI and API testing:
 
-Reviewer UI is also available at GET `/ui` for quick manual testing of reset/step/state flows.
+- `GET /` opens the reviewer cockpit UI.
+- `GET /ui` also serves the same cockpit directly.
+- Core API endpoints (`/reset`, `/step`, `/state`, `/tasks`, `/schema`) remain unchanged.
 
 To validate behavior manually, use the API endpoints:
 1. POST `/reset` with `{ "task_name": "easy_config_error" }`.
@@ -128,6 +145,13 @@ To validate behavior manually, use the API endpoints:
 ```bash
 openenv push --repo-id makrand098/incident-env
 ```
+
+### Reproducibility Report
+```bash
+python scripts/reproducibility_report.py
+```
+
+This script runs a fixed deterministic policy across fixed seeds and prints mean/min/max scores per task.
 
 ## Baseline Scores
 

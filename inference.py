@@ -32,6 +32,10 @@ MAX_TOKENS = 300
 ENV_NAME = "incident_env"
 
 TASKS = ["easy_config_error", "medium_cascading_db", "hard_intermittent_auth"]
+VALID_ACTIONS = {
+    "query_logs", "check_metrics", "read_runbook", "identify_root_cause",
+    "execute_remedy", "escalate", "get_status", "communicate_status", "noop",
+}
 
 TASK_CONTEXT = {
     "easy_config_error": {
@@ -156,10 +160,65 @@ def clamp_reward(value: Optional[float]) -> float:
     return round(max(0.01, min(0.95, numeric)), 2)
 
 
+def sanitize_action(task_name: str, action: Dict, recent_action_keys: List[str]) -> Dict:
+    """Normalize model output into a safe, valid IncidentAction payload."""
+    services = TASK_CONTEXT.get(task_name, {}).get("services", [])
+    default_service = services[0] if services else "payment-service"
+
+    action_type = str(action.get("action_type", "noop")).strip().lower()
+    if action_type not in VALID_ACTIONS:
+        action_type = "noop"
+
+    target = str(action.get("target", "") or "").strip()
+    params = action.get("parameters", {})
+    if not isinstance(params, dict):
+        params = {}
+
+    # Bias away from repeated low-information loops.
+    action_key = f"{action_type}:{target}:{json.dumps(params, sort_keys=True)}"
+    if len(recent_action_keys) >= 2 and recent_action_keys[-1] == action_key == recent_action_keys[-2]:
+        action_type = "get_status"
+        target = ""
+        params = {}
+
+    if action_type in {"query_logs", "check_metrics", "read_runbook"}:
+        if not target or target not in services:
+            target = default_service
+
+    if action_type == "execute_remedy":
+        service = str(params.get("service", target or default_service)).strip()
+        remedy = str(params.get("remedy", "")).strip() or "rollback_config"
+        params = {"service": service, "remedy": remedy}
+        target = target or service
+
+    if action_type == "identify_root_cause":
+        cause = str(params.get("cause", target)).strip()
+        if not cause:
+            cause = "Likely service configuration mismatch causing incident symptoms"
+        params = {"cause": cause}
+        target = ""
+
+    if action_type == "communicate_status":
+        message = str(params.get("message", "Investigating and collecting evidence.")).strip()
+        params = {"message": message}
+        target = ""
+
+    if action_type in {"get_status", "noop", "escalate"}:
+        if action_type == "escalate":
+            reason = str(params.get("reason", "Unable to progress safely")).strip()
+            params = {"reason": reason}
+        else:
+            params = {}
+        target = ""
+
+    return {"action_type": action_type, "target": target, "parameters": params}
+
+
 def run_task(client: OpenAI, env_base_url: str, task_name: str) -> tuple:
     """Run a single task. Returns (success, steps, score, rewards_list)."""
 
     rewards: List[float] = []
+    recent_action_keys: List[str] = []
     step_count = 0
     success = False
 
@@ -207,21 +266,19 @@ def run_task(client: OpenAI, env_base_url: str, task_name: str) -> tuple:
 
                     action = parse_action(llm_output)
                     if not action:
-                        action_str = "parse_error()"
-                        error_str = "Could not parse action from LLM output"
-                        messages.append({"role": "assistant", "content": llm_output})
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                'Respond with ONLY a JSON object. Example: '
-                                f'{{"action_type": "query_logs", "target": "{services[0] if services else "payment-service"}", "parameters": {{"filter": "error"}}}}'
-                            ),
-                        })
-                        rewards.append(reward)
-                        print(f"[STEP] step={step_count} action={action_str} reward={reward:.2f} done=false error={error_str}")
-                        continue
+                        action = {
+                            "action_type": "query_logs",
+                            "target": services[0] if services else "payment-service",
+                            "parameters": {"filter": "error"},
+                        }
+                        error_str = "Could not parse action from LLM output; used safe fallback"
+
+                    action = sanitize_action(task_name, action, recent_action_keys)
 
                     action_str = format_action_str(action)
+                    recent_action_keys.append(
+                        f"{action['action_type']}:{action['target']}:{json.dumps(action['parameters'], sort_keys=True)}"
+                    )
 
                     step_result = env.step(
                         IncidentAction(

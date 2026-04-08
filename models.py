@@ -34,6 +34,9 @@ class IncidentObservation(Observation):
     time_elapsed_minutes: float = Field(default=0.0, description="Simulated time elapsed")
     step_number: int = Field(default=0, description="Current step")
     max_steps: int = Field(default=15, description="Maximum allowed steps")
+    final_score: float = Field(default=0.0, description="Current or final deterministic task score")
+    score_breakdown: Dict[str, float] = Field(default_factory=dict, description="Deterministic grading breakdown")
+    scenario_variant: str = Field(default="", description="Deterministic scenario variant label")
 
 
 class IncidentState(State):
@@ -50,3 +53,4 @@ class IncidentState(State):
     total_clues_available: int = Field(default=0)
     steps_used: int = Field(default=0)
     wrong_actions_taken: int = Field(default=0)
+    scenario_variant: str = Field(default="")

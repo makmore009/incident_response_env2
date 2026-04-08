@@ -74,14 +74,14 @@ async def health():
 
 @app.get("/ui", response_class=HTMLResponse)
 async def ui():
-    """Minimal browser UI for manual review and demo flows."""
+    """Reviewer cockpit UI for manual and scripted demo flows."""
     return """
 <!doctype html>
 <html lang=\"en\">
 <head>
     <meta charset=\"utf-8\" />
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>Incident Env UI</title>
+    <title>Incident Env Reviewer Cockpit</title>
     <style>
         :root {
             --bg-a: #f5f7ff;
@@ -135,6 +135,17 @@ async def ui():
             margin-top: 10px;
         }
         .btn:hover { filter: brightness(1.03); }
+        .btn.alt {
+            background: linear-gradient(135deg, #2563eb, #0ea5e9);
+        }
+        .btn.warn {
+            background: linear-gradient(135deg, #b45309, #ef4444);
+        }
+        .small {
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 6px;
+        }
         pre {
             margin: 0;
             background: #111827;
@@ -148,6 +159,14 @@ async def ui():
             font-size: 12px;
             line-height: 1.45;
         }
+        .panel-title {
+            margin: 0 0 8px;
+            font-weight: 700;
+        }
+        .stack {
+            display: grid;
+            gap: 12px;
+        }
         @media (max-width: 900px) {
             .grid { grid-template-columns: 1fr; }
             pre { min-height: 280px; }
@@ -157,7 +176,7 @@ async def ui():
 <body>
     <div class=\"wrap\">
         <h1>Incident Response Environment</h1>
-        <p class=\"sub\">Manual reviewer UI for reset/step/state API flow.</p>
+        <p class=\"sub\">Reviewer cockpit with scripted good-path and exploit-path runs.</p>
         <div class=\"grid\">
             <div class=\"card\">
                 <label>Task</label>
@@ -166,7 +185,13 @@ async def ui():
                     <option value=\"medium_cascading_db\">medium_cascading_db</option>
                     <option value=\"hard_intermittent_auth\">hard_intermittent_auth</option>
                 </select>
+
+                <label>Seed</label>
+                <input id=\"seed\" value=\"42\" />
                 <button class=\"btn\" onclick=\"doReset()\">Reset Episode</button>
+                <button class=\"btn alt\" onclick=\"runGoodPath()\">Run Good Path</button>
+                <button class=\"btn warn\" onclick=\"runExploitPath()\">Run Exploit Path</button>
+                <div class=\"small\">Good path demonstrates evidence-backed resolution. Exploit path demonstrates penalties.</div>
 
                 <hr style=\"border:none;border-top:1px solid #e6ebf7;margin:14px 0;\" />
 
@@ -198,14 +223,28 @@ async def ui():
                 <button class=\"btn\" style=\"margin-top:8px\" onclick=\"getState()\">Get State</button>
             </div>
 
-            <div class=\"card\">
-                <pre id=\"out\">Ready. Click Reset Episode.</pre>
+            <div class=\"stack\">
+                <div class=\"card\">
+                    <div class=\"panel-title\">Latest Payload</div>
+                    <pre id=\"out\">Ready. Click Reset Episode.</pre>
+                </div>
+                <div class=\"card\">
+                    <div class=\"panel-title\">Action History</div>
+                    <pre id=\"history\">No actions yet.</pre>
+                </div>
+                <div class=\"card\">
+                    <div class=\"panel-title\">Score Breakdown</div>
+                    <pre id=\"score\">Terminal score breakdown appears when episode ends.</pre>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
         const out = document.getElementById('out');
+        const historyEl = document.getElementById('history');
+        const scoreEl = document.getElementById('score');
+        let actionHistory = [];
 
         function parseParams(src) {
             const result = {};
@@ -222,31 +261,127 @@ async def ui():
             out.textContent = `${label}\n${JSON.stringify(data, null, 2)}`;
         }
 
+        function renderHistory() {
+            if (!actionHistory.length) {
+                historyEl.textContent = 'No actions yet.';
+                return;
+            }
+            historyEl.textContent = actionHistory
+                .map((h, i) => `${i + 1}. ${h.action_type} target=${h.target || '-'} params=${JSON.stringify(h.parameters || {})}`)
+                .join('\n');
+        }
+
+        function renderScore(data) {
+            if (data && data.score_breakdown && Object.keys(data.score_breakdown).length) {
+                scoreEl.textContent = JSON.stringify(data.score_breakdown, null, 2);
+            } else {
+                scoreEl.textContent = 'Terminal score breakdown appears when episode ends.';
+            }
+        }
+
         async function doReset() {
             const task = document.getElementById('task').value;
+            const seed = Number(document.getElementById('seed').value || '42');
+            actionHistory = [];
+            renderHistory();
+            renderScore(null);
             const r = await fetch('/reset', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ task_name: task })
+                body: JSON.stringify({ task_name: task, seed })
             });
             write('POST /reset', await r.json());
+        }
+
+        async function stepWithPayload(payload, label = 'POST /step') {
+            actionHistory.push(payload);
+            renderHistory();
+            const r = await fetch('/step', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await r.json();
+            write(label, data);
+            renderScore(data);
+            return data;
         }
 
         async function doStep() {
             const action_type = document.getElementById('actionType').value;
             const target = document.getElementById('target').value;
             const parameters = parseParams(document.getElementById('kv').value);
-            const r = await fetch('/step', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action_type, target, parameters })
-            });
-            write('POST /step', await r.json());
+            await stepWithPayload({ action_type, target, parameters });
         }
 
         async function getState() {
             const r = await fetch('/state');
             write('GET /state', await r.json());
+        }
+
+        function getGoodPath(task) {
+            if (task === 'easy_config_error') {
+                return [
+                    { action_type: 'query_logs', target: 'payment-service', parameters: { filter: 'error' } },
+                    { action_type: 'check_metrics', target: 'payment-service', parameters: {} },
+                    { action_type: 'read_runbook', target: 'payment-service', parameters: {} },
+                    { action_type: 'communicate_status', target: '', parameters: { message: 'Root cause isolated in payment-service config.' } },
+                    { action_type: 'identify_root_cause', target: '', parameters: { cause: 'misconfigured STRIPE_API_KEY environment variable' } },
+                    { action_type: 'get_status', target: '', parameters: {} },
+                    { action_type: 'execute_remedy', target: '', parameters: { service: 'payment-service', remedy: 'rollback_config' } }
+                ];
+            }
+            if (task === 'medium_cascading_db') {
+                return [
+                    { action_type: 'query_logs', target: 'api-gateway', parameters: { filter: 'timeout' } },
+                    { action_type: 'check_metrics', target: 'db-primary', parameters: {} },
+                    { action_type: 'query_logs', target: 'db-primary', parameters: { filter: 'query' } },
+                    { action_type: 'read_runbook', target: 'db-primary', parameters: {} },
+                    { action_type: 'identify_root_cause', target: '', parameters: { cause: 'long-running query exhausting db-primary connection pool and causing cascading failures' } },
+                    { action_type: 'get_status', target: '', parameters: {} },
+                    { action_type: 'execute_remedy', target: '', parameters: { service: 'db-primary', remedy: 'kill_query' } }
+                ];
+            }
+            return [
+                { action_type: 'query_logs', target: 'auth-service', parameters: { filter: '401' } },
+                { action_type: 'check_metrics', target: 'token-cache', parameters: {} },
+                { action_type: 'read_runbook', target: 'auth-service', parameters: {} },
+                { action_type: 'identify_root_cause', target: '', parameters: { cause: 'race condition between key rotation and token-cache invalidation causing stale token validation failures' } },
+                { action_type: 'get_status', target: '', parameters: {} },
+                { action_type: 'execute_remedy', target: '', parameters: { service: 'auth-service', remedy: 'token-cache-race-fix' } }
+            ];
+        }
+
+        function getExploitPath(task) {
+            const target = task === 'easy_config_error' ? 'payment-service' : (task === 'medium_cascading_db' ? 'db-primary' : 'auth-service');
+            return [
+                { action_type: 'noop', target: '', parameters: {} },
+                { action_type: 'noop', target: '', parameters: {} },
+                { action_type: 'execute_remedy', target: '', parameters: { service: target, remedy: 'restart_service' } },
+                { action_type: 'execute_remedy', target: '', parameters: { service: target, remedy: 'restart_service' } },
+                { action_type: 'escalate', target: '', parameters: { reason: 'Escalating early without diagnosis' } }
+            ];
+        }
+
+        async function runSequence(seq, label) {
+            for (const item of seq) {
+                const data = await stepWithPayload(item, label);
+                if (data.done) {
+                    break;
+                }
+            }
+        }
+
+        async function runGoodPath() {
+            await doReset();
+            const task = document.getElementById('task').value;
+            await runSequence(getGoodPath(task), 'Demo: good path');
+        }
+
+        async function runExploitPath() {
+            await doReset();
+            const task = document.getElementById('task').value;
+            await runSequence(getExploitPath(task), 'Demo: exploit path');
         }
     </script>
 </body>

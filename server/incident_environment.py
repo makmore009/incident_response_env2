@@ -16,6 +16,7 @@ from .graders import (
     EpisodeHistory,
     check_remedy,
     check_root_cause,
+    get_grade_breakdown,
     grade_episode,
 )
 from .scenarios import Scenario, get_scenario
@@ -59,6 +60,9 @@ class IncidentEnvironment(Environment):
         self._prev_destructive: int = 0
         self._prev_escalations: int = 0
         self._trajectory_reward_sum: float = self.MIN_REWARD
+        self._scenario_seed: int = 42
+        self._scenario_variant: str = "v1"
+        self._last_grade_breakdown: dict = {}
         self._state = IncidentState(
             episode_id=str(uuid4()),
             step_count=0,
@@ -67,8 +71,15 @@ class IncidentEnvironment(Environment):
 
     def reset(self, seed: Optional[int] = None, **kwargs: Any) -> IncidentObservation:
         task_name = kwargs.get("task_name", "easy_config_error")
+        requested_seed = seed if seed is not None else kwargs.get("seed", 42)
+        try:
+            seed_value = int(requested_seed)
+        except (TypeError, ValueError):
+            seed_value = 42
 
-        self._scenario = get_scenario(task_name, seed=seed or 42)
+        self._scenario_seed = seed_value
+        self._scenario_variant = f"v{(abs(self._scenario_seed) % 3) + 1}"
+        self._scenario = get_scenario(task_name, seed=seed_value)
         self._history = EpisodeHistory()
         self._findings = []
         self._done = False
@@ -80,6 +91,7 @@ class IncidentEnvironment(Environment):
         self._prev_destructive = 0
         self._prev_escalations = 0
         self._trajectory_reward_sum = self.MIN_REWARD
+        self._last_grade_breakdown = {}
 
         self._state = IncidentState(
             episode_id=str(uuid4()),
@@ -88,6 +100,7 @@ class IncidentEnvironment(Environment):
             task_difficulty=self._scenario.task_difficulty,
             severity=self._scenario.severity,
             cum_reward=self.MIN_REWARD,
+            scenario_variant=self._scenario_variant,
         )
 
         return IncidentObservation(
@@ -104,6 +117,9 @@ class IncidentEnvironment(Environment):
             max_steps=self._scenario.max_steps,
             done=False,
             reward=self.MIN_REWARD,
+            final_score=self.MIN_REWARD,
+            score_breakdown={},
+            scenario_variant=self._scenario_variant,
         )
 
     def step(self, action: IncidentAction) -> IncidentObservation:  # type: ignore[override]
@@ -124,15 +140,19 @@ class IncidentEnvironment(Environment):
 
         self._history.steps_used = self._step_count
         is_done = self._done or self._step_count >= self._scenario.max_steps
+        score_breakdown = {}
 
         if is_done:
             # Convert final grade to a terminal delta reward so the episode return
             # remains strictly below 1.0 even after incremental step rewards.
-            target_final_grade = grade_episode(self._scenario, self._history)
+            score_breakdown = get_grade_breakdown(self._scenario, self._history)
+            target_final_grade = float(score_breakdown.get("total", grade_episode(self._scenario, self._history)))
             terminal_delta = target_final_grade - self._trajectory_reward_sum
             reward = self._clamp_open_reward(terminal_delta)
             remaining_budget = round(max(self.MIN_REWARD, self.MAX_REWARD - self._trajectory_reward_sum), 4)
             reward = round(min(reward, remaining_budget), 4)
+            self._last_grade_breakdown = score_breakdown
+            result_text = f"{result_text}\n\n{self._format_score_breakdown(score_breakdown)}"
         else:
             reward = self._compute_step_reward()
 
@@ -146,6 +166,13 @@ class IncidentEnvironment(Environment):
         self._state.total_clues_available = self._scenario.total_clues
         self._state.steps_used = self._step_count
         self._state.wrong_actions_taken = self._history.wrong_remedies + self._history.destructive_actions
+        self._state.scenario_variant = self._scenario_variant
+
+        final_score = (
+            float(score_breakdown.get("total", self._trajectory_reward_sum))
+            if is_done
+            else float(grade_episode(self._scenario, self._history))
+        )
 
         return IncidentObservation(
             alert_summary=self._scenario.alert_summary,
@@ -161,6 +188,9 @@ class IncidentEnvironment(Environment):
             max_steps=self._scenario.max_steps,
             done=is_done,
             reward=reward,
+            final_score=round(final_score, 4),
+            score_breakdown=score_breakdown,
+            scenario_variant=self._scenario_variant,
         )
 
     @property
@@ -348,6 +378,7 @@ class IncidentEnvironment(Environment):
 
     def _handle_get_status(self) -> str:
         self._history.status_checks += 1
+        score_preview = grade_episode(self._scenario, self._history)
         status = {
             "alert": self._scenario.alert_summary,
             "severity": self._scenario.severity,
@@ -362,6 +393,9 @@ class IncidentEnvironment(Environment):
             "available_services": list(self._scenario.services.keys()),
             "communication_updates": self._history.communication_updates,
             "verification_completed": self._history.verification_completed,
+            "scenario_variant": self._scenario_variant,
+            "score_preview": score_preview,
+            "score_breakdown": self._last_grade_breakdown if self._done else None,
         }
         return json.dumps(status, indent=2)
 
@@ -375,6 +409,29 @@ class IncidentEnvironment(Environment):
     def _handle_noop(self) -> str:
         self._history.noop_count += 1
         return "No-op recorded. Continue investigating to improve score."
+
+    @staticmethod
+    def _format_score_breakdown(score_breakdown: dict) -> str:
+        if not score_breakdown:
+            return "Score breakdown unavailable"
+
+        ordered_keys = [
+            "root_cause",
+            "root_cause_evidence",
+            "remedy",
+            "verification",
+            "communication",
+            "efficiency",
+            "clue_discovery",
+            "penalty_wrong_remedy",
+            "penalty_destructive",
+            "penalty_escalation",
+            "penalty_risky_action",
+            "penalty_noop",
+            "total",
+        ]
+        filtered = {k: score_breakdown[k] for k in ordered_keys if k in score_breakdown}
+        return "Score breakdown:\n" + json.dumps(filtered, indent=2)
 
     # -- Incremental reward --
 
