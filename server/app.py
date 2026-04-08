@@ -2,6 +2,7 @@
 
 import os
 from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 
 try:
     from openenv.core.env_server.http_server import create_app
@@ -44,8 +45,8 @@ async def root():
 
 @app.get("/")
 async def index():
-    """Root endpoint with environment metadata."""
-    return await root()
+    """Root endpoint for Spaces App tab: redirect to human UI."""
+    return RedirectResponse(url="/ui", status_code=307)
 
 
 @app.get("/tasks")
