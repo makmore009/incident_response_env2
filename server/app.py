@@ -3,6 +3,7 @@
 import os
 from fastapi.responses import HTMLResponse
 from fastapi.responses import RedirectResponse
+from fastapi.responses import Response
 
 try:
     from openenv.core.env_server.http_server import create_app
@@ -188,9 +189,9 @@ async def ui():
 
                 <label>Seed</label>
                 <input id=\"seed\" value=\"42\" />
-                <button class=\"btn\" onclick=\"doReset()\">Reset Episode</button>
-                <button class=\"btn alt\" onclick=\"runGoodPath()\">Run Good Path</button>
-                <button class=\"btn warn\" onclick=\"runExploitPath()\">Run Exploit Path</button>
+                <button id=\"resetBtn\" type=\"button\" class=\"btn\" onclick=\"doReset()\">Reset Episode</button>
+                <button id=\"goodPathBtn\" type=\"button\" class=\"btn alt\" onclick=\"runGoodPath()\">Run Good Path</button>
+                <button id=\"exploitPathBtn\" type=\"button\" class=\"btn warn\" onclick=\"runExploitPath()\">Run Exploit Path</button>
                 <div class=\"small\">Good path demonstrates evidence-backed resolution. Exploit path demonstrates penalties.</div>
 
                 <hr style=\"border:none;border-top:1px solid #e6ebf7;margin:14px 0;\" />
@@ -219,8 +220,8 @@ async def ui():
                     </div>
                 </div>
 
-                <button class=\"btn\" onclick=\"doStep()\">Send Step</button>
-                <button class=\"btn\" style=\"margin-top:8px\" onclick=\"getState()\">Get State</button>
+                <button id=\"sendStepBtn\" type=\"button\" class=\"btn\" onclick=\"doStep()\">Send Step</button>
+                <button id=\"getStateBtn\" type=\"button\" class=\"btn\" style=\"margin-top:8px\" onclick=\"getState()\">Get State</button>
             </div>
 
             <div class=\"stack\">
@@ -402,9 +403,211 @@ async def ui():
             await runSequence(getExploitPath(task), 'Demo: exploit path');
         }
     </script>
+    <script src=\"/ui.js\"></script>
 </body>
 </html>
 """
+
+
+@app.get("/ui.js")
+async def ui_js():
+        """External script for reviewer UI interactions."""
+        return Response(
+                content="""
+(function () {
+    const out = document.getElementById('out');
+    const historyEl = document.getElementById('history');
+    const scoreEl = document.getElementById('score');
+    let actionHistory = [];
+
+    function parseParams(src) {
+        const result = {};
+        if (!src || !src.trim()) return result;
+        src.split(',').forEach(part => {
+            const [k, ...rest] = part.split('=');
+            if (!k) return;
+            result[k.trim()] = rest.join('=').trim();
+        });
+        return result;
+    }
+
+    function write(label, data) {
+        if (!out) return;
+        out.textContent = label + "\\n" + JSON.stringify(data, null, 2);
+    }
+
+    function writeError(label, err) {
+        if (!out) return;
+        const message = err && err.message ? err.message : String(err);
+        out.textContent = label + "\\n" + message;
+    }
+
+    function renderHistory() {
+        if (!historyEl) return;
+        if (!actionHistory.length) {
+            historyEl.textContent = 'No actions yet.';
+            return;
+        }
+        historyEl.textContent = actionHistory
+            .map((h, i) => `${i + 1}. ${h.action_type} target=${h.target || '-'} params=${JSON.stringify(h.parameters || {})}`)
+            .join('\\n');
+    }
+
+    function renderScore(data) {
+        if (!scoreEl) return;
+        if (data && data.score_breakdown && Object.keys(data.score_breakdown).length) {
+            scoreEl.textContent = JSON.stringify(data.score_breakdown, null, 2);
+        } else {
+            scoreEl.textContent = 'Terminal score breakdown appears when episode ends.';
+        }
+    }
+
+    async function doReset() {
+        const task = document.getElementById('task').value;
+        const seed = Number(document.getElementById('seed').value || '42');
+        actionHistory = [];
+        renderHistory();
+        renderScore(null);
+        try {
+            const r = await fetch('/reset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ task_name: task, seed })
+            });
+            write('POST /reset', await r.json());
+        } catch (err) {
+            writeError('POST /reset error', err);
+        }
+    }
+
+    async function stepWithPayload(payload, label = 'POST /step') {
+        actionHistory.push(payload);
+        renderHistory();
+        try {
+            const r = await fetch('/step', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: payload })
+            });
+            const data = await r.json();
+            write(label, data);
+            renderScore(data && data.observation ? data.observation : data);
+            return data;
+        } catch (err) {
+            writeError(`${label} error`, err);
+            throw err;
+        }
+    }
+
+    async function doStep() {
+        const action_type = document.getElementById('actionType').value;
+        const target = document.getElementById('target').value;
+        const parameters = parseParams(document.getElementById('kv').value);
+        await stepWithPayload({ action_type, target, parameters });
+    }
+
+    async function getState() {
+        try {
+            const r = await fetch('/state');
+            write('GET /state', await r.json());
+        } catch (err) {
+            writeError('GET /state error', err);
+        }
+    }
+
+    function getGoodPath(task) {
+        if (task === 'easy_config_error') {
+            return [
+                { action_type: 'query_logs', target: 'payment-service', parameters: { filter: 'error' } },
+                { action_type: 'check_metrics', target: 'payment-service', parameters: {} },
+                { action_type: 'read_runbook', target: 'payment-service', parameters: {} },
+                { action_type: 'communicate_status', target: '', parameters: { message: 'Root cause isolated in payment-service config.' } },
+                { action_type: 'identify_root_cause', target: '', parameters: { cause: 'misconfigured STRIPE_API_KEY environment variable' } },
+                { action_type: 'get_status', target: '', parameters: {} },
+                { action_type: 'execute_remedy', target: '', parameters: { service: 'payment-service', remedy: 'rollback_config' } }
+            ];
+        }
+        if (task === 'medium_cascading_db') {
+            return [
+                { action_type: 'query_logs', target: 'api-gateway', parameters: { filter: 'timeout' } },
+                { action_type: 'check_metrics', target: 'db-primary', parameters: {} },
+                { action_type: 'query_logs', target: 'db-primary', parameters: { filter: 'query' } },
+                { action_type: 'read_runbook', target: 'db-primary', parameters: {} },
+                { action_type: 'identify_root_cause', target: '', parameters: { cause: 'long-running query exhausting db-primary connection pool and causing cascading failures' } },
+                { action_type: 'get_status', target: '', parameters: {} },
+                { action_type: 'execute_remedy', target: '', parameters: { service: 'db-primary', remedy: 'kill_query' } }
+            ];
+        }
+        return [
+            { action_type: 'query_logs', target: 'auth-service', parameters: { filter: '401' } },
+            { action_type: 'check_metrics', target: 'token-cache', parameters: {} },
+            { action_type: 'read_runbook', target: 'auth-service', parameters: {} },
+            { action_type: 'identify_root_cause', target: '', parameters: { cause: 'race condition between key rotation and token-cache invalidation causing stale token validation failures' } },
+            { action_type: 'get_status', target: '', parameters: {} },
+            { action_type: 'execute_remedy', target: '', parameters: { service: 'auth-service', remedy: 'token-cache-race-fix' } }
+        ];
+    }
+
+    function getExploitPath(task) {
+        const target = task === 'easy_config_error' ? 'payment-service' : (task === 'medium_cascading_db' ? 'db-primary' : 'auth-service');
+        return [
+            { action_type: 'noop', target: '', parameters: {} },
+            { action_type: 'noop', target: '', parameters: {} },
+            { action_type: 'execute_remedy', target: '', parameters: { service: target, remedy: 'restart_service' } },
+            { action_type: 'execute_remedy', target: '', parameters: { service: target, remedy: 'restart_service' } },
+            { action_type: 'escalate', target: '', parameters: { reason: 'Escalating early without diagnosis' } }
+        ];
+    }
+
+    async function runSequence(seq, label) {
+        for (const item of seq) {
+            const data = await stepWithPayload(item, label);
+            if (data.done) break;
+        }
+    }
+
+    async function runGoodPath() {
+        await doReset();
+        const task = document.getElementById('task').value;
+        await runSequence(getGoodPath(task), 'Demo: good path');
+    }
+
+    async function runExploitPath() {
+        await doReset();
+        const task = document.getElementById('task').value;
+        await runSequence(getExploitPath(task), 'Demo: exploit path');
+    }
+
+    const resetBtn = document.getElementById('resetBtn');
+    const goodPathBtn = document.getElementById('goodPathBtn');
+    const exploitPathBtn = document.getElementById('exploitPathBtn');
+    const sendStepBtn = document.getElementById('sendStepBtn');
+    const getStateBtn = document.getElementById('getStateBtn');
+
+    if (resetBtn) {
+        resetBtn.onclick = null;
+        resetBtn.addEventListener('click', doReset);
+    }
+    if (goodPathBtn) {
+        goodPathBtn.onclick = null;
+        goodPathBtn.addEventListener('click', runGoodPath);
+    }
+    if (exploitPathBtn) {
+        exploitPathBtn.onclick = null;
+        exploitPathBtn.addEventListener('click', runExploitPath);
+    }
+    if (sendStepBtn) {
+        sendStepBtn.onclick = null;
+        sendStepBtn.addEventListener('click', doStep);
+    }
+    if (getStateBtn) {
+        getStateBtn.onclick = null;
+        getStateBtn.addEventListener('click', getState);
+    }
+})();
+                """,
+                media_type="application/javascript",
+        )
 
 
 def main():
