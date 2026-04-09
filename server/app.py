@@ -261,6 +261,11 @@ async def ui():
             out.textContent = `${label}\n${JSON.stringify(data, null, 2)}`;
         }
 
+        function writeError(label, err) {
+            const message = err && err.message ? err.message : String(err);
+            out.textContent = `${label}\n${message}`;
+        }
+
         function renderHistory() {
             if (!actionHistory.length) {
                 historyEl.textContent = 'No actions yet.';
@@ -285,26 +290,35 @@ async def ui():
             actionHistory = [];
             renderHistory();
             renderScore(null);
-            const r = await fetch('/reset', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ task_name: task, seed })
-            });
-            write('POST /reset', await r.json());
+            try {
+                const r = await fetch('/reset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ task_name: task, seed })
+                });
+                write('POST /reset', await r.json());
+            } catch (err) {
+                writeError('POST /reset error', err);
+            }
         }
 
         async function stepWithPayload(payload, label = 'POST /step') {
             actionHistory.push(payload);
             renderHistory();
-            const r = await fetch('/step', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            const data = await r.json();
-            write(label, data);
-            renderScore(data);
-            return data;
+            try {
+                const r = await fetch('/step', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: payload })
+                });
+                const data = await r.json();
+                write(label, data);
+                renderScore(data && data.observation ? data.observation : data);
+                return data;
+            } catch (err) {
+                writeError(`${label} error`, err);
+                throw err;
+            }
         }
 
         async function doStep() {
@@ -315,8 +329,12 @@ async def ui():
         }
 
         async function getState() {
-            const r = await fetch('/state');
-            write('GET /state', await r.json());
+            try {
+                const r = await fetch('/state');
+                write('GET /state', await r.json());
+            } catch (err) {
+                writeError('GET /state error', err);
+            }
         }
 
         function getGoodPath(task) {
